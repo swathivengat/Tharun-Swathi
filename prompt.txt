@@ -1,0 +1,605 @@
+TASK: FAST OPENROUTER-BASED PSEUDO-LABELING OF 12,277 CONTRACT CLAUSES
+
+Goal:
+Create a separate pseudo-labeled dataset from merged_dataset.csv using OpenRouter API.
+
+The dataset must be labeled using the project's existing 14-category NDA taxonomy.
+
+DO NOT modify the existing NDA benchmark, train/validation/test splits, model-training scripts, evaluation scripts, or experiment configuration.
+
+==================================================
+INPUT
+==================================================
+
+Input file:
+
+merged_dataset.csv
+
+Expected size:
+approximately 12,277 clauses.
+
+First inspect the CSV and identify:
+- clause text column
+- source identifier
+- original category
+- risk level
+- missing values
+- duplicates
+
+Use ONLY the clause text for the new pseudo-labeling task.
+
+The existing 54-category labels must NOT be used as target labels.
+
+==================================================
+TARGET TAXONOMY
+==================================================
+
+Use exactly these 14 categories:
+
+1. Party Identification
+2. Purpose
+3. NDA Type
+4. Definition of Confidential Information
+5. Confidentiality Obligations
+6. Authorized Disclosure
+7. Non-Confidential Information
+8. Liability for Damages
+9. Competition Rights
+10. Term and Termination
+11. Intellectual Property
+12. Employees
+13. Governing Law and Jurisdiction
+14. Additional Information
+
+This is MULTI-LABEL classification.
+
+A clause may receive multiple categories.
+
+If none of the categories applies:
+
+NOT_RELEVANT
+
+Never force a clause into a category.
+
+==================================================
+OPENROUTER API
+==================================================
+
+The labeling backend is OPENROUTER API.
+
+Do NOT implement direct Gemini API calls.
+
+Use the OpenRouter-compatible API endpoint and model identifiers already configured in the project if they exist.
+
+FIRST inspect the existing project code and locate:
+- OPENROUTER_API_KEY handling
+- OpenRouter base URL
+- existing model IDs
+- existing three-model ensemble configuration
+- existing request/response logic
+
+Reuse the existing implementation where possible.
+
+NEVER hard-code the API key.
+
+Read it from the existing environment/configuration mechanism.
+
+Do not print the API key in logs.
+
+==================================================
+THREE-MODEL ENSEMBLE
+==================================================
+
+The project uses a three-model LLM ensemble through OpenRouter.
+
+Identify the three configured models from the existing project.
+
+Do NOT assume model names without inspecting the current code/config.
+
+For each relevant clause, obtain predictions from all three models.
+
+Store:
+
+model_1
+model_1_labels
+model_1_confidence
+
+model_2
+model_2_labels
+model_2_confidence
+
+model_3
+model_3_labels
+model_3_confidence
+
+Then calculate:
+
+final_labels
+agreement
+final_confidence
+
+==================================================
+FAST TWO-STAGE PIPELINE
+==================================================
+
+To reduce cost and runtime, use two stages.
+
+STAGE 1:
+Fast relevance filtering.
+
+Use ONE OpenRouter model to determine:
+
+RELEVANT
+NOT_RELEVANT
+UNCERTAIN
+
+The model should determine whether the clause belongs to at least one of the 14 NDA categories.
+
+Do NOT perform full ensemble classification during Stage 1.
+
+STAGE 2:
+Only RELEVANT and UNCERTAIN clauses go through the full three-model ensemble.
+
+NOT_RELEVANT clauses are stored separately and are not sent to the expensive ensemble.
+
+This is intended to reduce API calls.
+
+==================================================
+BATCH PROCESSING
+==================================================
+
+DO NOT make one API request per clause.
+
+Batch multiple clauses into each OpenRouter request.
+
+Default:
+
+--batch-size 25
+
+Make this configurable.
+
+Allow:
+
+--batch-size 10
+--batch-size 25
+--batch-size 50
+
+Start at 25.
+
+If token limits or malformed responses occur, automatically reduce the batch size.
+
+Every clause must have a unique source_id.
+
+The model must return one structured result for every source_id in the batch.
+
+==================================================
+STRUCTURED JSON
+==================================================
+
+Require strict JSON output.
+
+Example:
+
+{
+  "results": [
+    {
+      "source_id": "123",
+      "relevance": "RELEVANT",
+      "labels": [
+        "Confidentiality Obligations",
+        "Authorized Disclosure"
+      ],
+      "confidence": "HIGH",
+      "reason": "..."
+    }
+  ]
+}
+
+The response must contain exactly the expected source IDs.
+
+Validate:
+- valid JSON
+- all source IDs present
+- no duplicate source IDs
+- only allowed categories
+- valid relevance values
+- valid confidence values
+
+If parsing fails:
+1. retry the request
+2. if necessary reduce batch size
+3. never silently accept malformed output
+
+==================================================
+CONTROLLED CONCURRENCY
+==================================================
+
+The main objective is FAST processing.
+
+Use asynchronous/concurrent OpenRouter requests.
+
+Make concurrency configurable:
+
+--max-workers 5
+
+Start with 3–5 workers.
+
+Do NOT use unlimited concurrency.
+
+Respect OpenRouter rate limits and the limits of the selected model/provider.
+
+If rate limiting occurs:
+- exponential backoff
+- retry
+- temporarily reduce concurrency if practical
+- continue processing completed batches
+
+The program must never lose completed results.
+
+==================================================
+CHECKPOINTING
+==================================================
+
+After EVERY successful batch:
+
+1. Save the batch result.
+2. Update progress.
+3. Record processed source IDs.
+4. Record failures.
+5. Record timestamp.
+
+Create:
+
+data/external_pseudo_labeled/checkpoints/
+
+Example:
+
+batch_000001.json
+batch_000002.json
+batch_000003.json
+
+Also maintain:
+
+progress.json
+
+with:
+
+total_input
+total_unique
+processed
+remaining
+relevant
+not_relevant
+uncertain
+high_confidence
+medium_confidence
+low_confidence
+disagreement
+failed
+
+==================================================
+RESUME SUPPORT
+==================================================
+
+The process MUST be resumable.
+
+Command:
+
+python <script> --resume
+
+must:
+
+1. Load progress/checkpoint files.
+2. Identify already processed source IDs.
+3. Skip completed clauses.
+4. Process only remaining clauses.
+5. Preserve all previous results.
+
+If Antigravity, Python, the terminal, or the computer is interrupted, no completed API work should be repeated.
+
+==================================================
+RETRY HANDLING
+==================================================
+
+Retry temporary failures:
+
+- timeout
+- HTTP 429
+- HTTP 500/502/503
+- connection errors
+- malformed model response
+
+Use exponential backoff.
+
+Make maximum retries configurable.
+
+After maximum retries:
+save the item/batch into:
+
+failed_items.csv
+
+and continue.
+
+Provide a separate command:
+
+--retry-failed
+
+to process failed items later.
+
+==================================================
+ENSEMBLE AGREEMENT
+==================================================
+
+Use majority agreement.
+
+Example:
+
+Model A:
+Confidentiality Obligations
+
+Model B:
+Confidentiality Obligations
+
+Model C:
+Confidentiality Obligations
+
+→ UNANIMOUS
+
+Example:
+
+Model A:
+Confidentiality Obligations
+
+Model B:
+Authorized Disclosure
+
+Model C:
+Confidentiality Obligations
+
+→ MAJORITY_2_OF_3
+→ final label = Confidentiality Obligations
+
+Example:
+
+Model A:
+Purpose
+
+Model B:
+NDA Type
+
+Model C:
+Governing Law and Jurisdiction
+
+→ DISAGREEMENT
+
+Do not silently choose a label in the complete-disagreement case.
+
+Preserve the disagreement.
+
+==================================================
+CONFIDENCE GROUPS
+==================================================
+
+Create:
+
+HIGH_CONFIDENCE
+MEDIUM_CONFIDENCE
+LOW_CONFIDENCE
+DISAGREEMENT
+NOT_RELEVANT
+
+Reuse the existing project confidence logic if available.
+
+Do not invent a new confidence methodology if the project already has one.
+
+If existing logic cannot be located, report this before implementing a replacement.
+
+==================================================
+MULTI-LABEL ENCODING
+==================================================
+
+Create both:
+
+1. Human-readable labels
+
+2. 14 binary columns
+
+Use:
+
+label_party_identification
+label_purpose
+label_nda_type
+label_definition_confidential_information
+label_confidentiality_obligations
+label_authorized_disclosure
+label_non_confidential_information
+label_liability_damages
+label_competition_rights
+label_term_termination
+label_intellectual_property
+label_employees
+label_governing_law_jurisdiction
+label_additional_information
+
+Example:
+
+Confidentiality Obligations +
+Authorized Disclosure
+
+becomes:
+
+0,0,0,0,1,1,0,0,0,0,0,0,0,0
+
+==================================================
+OUTPUTS
+==================================================
+
+Create a completely separate directory:
+
+data/external_pseudo_labeled/
+
+Create:
+
+external_clause_pool.csv
+
+external_pseudo_labels_all.csv
+
+external_pseudo_labels_relevant.csv
+
+external_pseudo_labels_high_confidence.csv
+
+external_pseudo_labels_high_medium.csv
+
+external_not_relevant.csv
+
+external_disagreement.csv
+
+external_failed.csv
+
+external_labeling_summary.json
+
+external_labeling_report.md
+
+Do NOT overwrite merged_dataset.csv.
+
+Do NOT modify the existing NDA classification dataset.
+
+==================================================
+DATA QUALITY REPORT
+==================================================
+
+Generate a report containing:
+
+INPUT:
+- original rows
+- valid clauses
+- duplicate count
+- unique clauses
+
+FILTERING:
+- relevant
+- not relevant
+- uncertain
+
+ENSEMBLE:
+- unanimous
+- majority 2/3
+- complete disagreement
+
+CONFIDENCE:
+- high
+- medium
+- low
+
+CATEGORY DISTRIBUTION:
+For each of the 14 categories:
+- count
+- percentage
+
+MULTI-LABEL:
+- average labels per clause
+- 1-label clauses
+- 2-label clauses
+- 3+ label clauses
+
+SOURCE:
+- source distribution
+
+QUALITY:
+- sample high-confidence clauses
+- sample disagreement clauses
+- sample NOT_RELEVANT clauses
+
+PERFORMANCE:
+- total API requests
+- successful requests
+- failed requests
+- retries
+- average batch processing time
+- clauses/minute
+- total runtime
+
+==================================================
+GPU
+==================================================
+
+Do NOT claim that the local GPU accelerates OpenRouter API inference.
+
+OpenRouter inference is remote.
+
+The local GPU is only relevant for later local Hugging Face model training/inference.
+
+Do not add unnecessary GPU code to the OpenRouter labeling pipeline.
+
+==================================================
+COST AND SPEED
+==================================================
+
+Optimize for both speed and API cost.
+
+Use:
+
+1. Batch requests
+2. Controlled concurrency
+3. Two-stage relevance filtering
+4. Checkpointing
+5. Resume support
+6. Retry handling
+7. Strict structured output
+8. No duplicate requests
+
+Before processing all 12,277 clauses:
+
+RUN A SMALL PILOT.
+
+Process only the first 100 unique clauses.
+
+Measure:
+
+- average response time
+- clauses/minute
+- API request count
+- failure rate
+- JSON parsing success
+- relevance distribution
+- ensemble agreement
+- approximate cost if available
+
+Then stop and report the pilot results.
+
+DO NOT automatically start all 12,277 clauses after the pilot.
+
+I will review the pilot before the full run.
+
+==================================================
+FINAL RESTRICTIONS
+==================================================
+
+Do NOT:
+
+- train any classifier
+- modify Legal-RoBERTa
+- modify Legal-BERT
+- modify DeBERTa-v3
+- modify existing train/validation/test splits
+- modify the current 338-clause benchmark
+- modify existing experiment configuration
+- replace existing pseudo-labeling data
+- overwrite any existing project files
+
+This task ONLY creates a separate external pseudo-labeled dataset.
+
+Before implementation:
+
+1. Inspect the project structure.
+2. Locate the current OpenRouter configuration.
+3. Locate the current three-model ensemble.
+4. Locate the current 14-category taxonomy.
+5. Inspect merged_dataset.csv.
+6. Show which existing scripts/components will be reused.
+7. Implement the standalone pipeline.
+8. Run the 100-clause pilot.
+9. Stop after the pilot and report results.
+
+IMPORTANT:
+Do not proceed to the full 12,277-clause run until the 100-clause pilot has been successfully validated.
